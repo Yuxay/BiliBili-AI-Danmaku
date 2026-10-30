@@ -94,7 +94,14 @@ class BilibiliSender:
         from ua import SEND_API_HEADERS
         headers = {**SEND_API_HEADERS, "Referer": f"https://live.bilibili.com/{room_id}"}
 
-        async with session.post(self.SEND_API, data=payload, cookies=cookies, headers=headers) as resp:
+        async with session.post(
+            self.SEND_API,
+            data=payload,
+            cookies=cookies,
+            headers=headers,
+            # 显式超时：避免网络异常时请求长期挂起
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
             text = await resp.text()
             try:
                 result = json.loads(text)

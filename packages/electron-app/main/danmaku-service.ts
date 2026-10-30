@@ -890,16 +890,16 @@ this._connected = true;
 
   /**
    * 向 Python 子进程发送 JSON-RPC 请求，返回 Promise。
-   * 超时 30 秒后自动 reject 并清理 pending 条目。
+   * 默认超时 30 秒（start 为 90 秒），可通过 timeoutMsOverride 覆盖。
    */
-  private async request(method: string, params: Record<string, unknown>): Promise<unknown> {
+  private async request(method: string, params: Record<string, unknown>, timeoutMsOverride?: number): Promise<unknown> {
     if (!this.isProcessAlive(this.process)) {
       throw new Error(`Python 进程未运行，无法执行请求: ${method}`);
     }
 
     const id = randomUUID();
     return new Promise((resolve, reject) => {
-      const timeoutMs = method === "start" ? 90000 : 30000;
+      const timeoutMs = timeoutMsOverride ?? (method === "start" ? 90000 : 30000);
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(id);
         reject(new Error(`Timeout: ${method}`));
