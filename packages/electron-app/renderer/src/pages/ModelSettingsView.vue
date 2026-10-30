@@ -45,6 +45,16 @@ interface AIModelForm {
   maxPending: number;
   ignoreUsernames: string[];
   skipReplies: string[];
+  /** 唤醒词（原始文本，按行/逗号分隔，保存时再解析成数组） */
+  wakeWords: string;
+  /** 滚动上下文条数，0=关闭 */
+  contextSize: number;
+  /** 回复闸门：只回复 @你 / 主播 */
+  replyOnlyWhenAddressed: boolean;
+  /** 回复闸门：每窗口最多回复条数，0=不限 */
+  replyMaxPerWindow: number;
+  /** 回复闸门：窗口时长（秒，保存时换算成 ms） */
+  replyWindowSec: number;
   maxTokens: number;
   temperature: number;
   topP: number;
@@ -192,6 +202,11 @@ const form = reactive<AIModelForm>({
   maxPending: 100,
   ignoreUsernames: [],
   skipReplies: ["NO_REPLY", "无需回复", "不需要回复", "不用回复", "不回复", "忽略", "skip", "pass"],
+  wakeWords: "比小哩\n比小哩_\n小哩\n哩哩",
+  contextSize: 6,
+  replyOnlyWhenAddressed: false,
+  replyMaxPerWindow: 3,
+  replyWindowSec: 60,
   maxTokens: 256,
   temperature: 0.7,
   topP: 1,
@@ -563,6 +578,15 @@ function parseSkipRepliesText(): string[] {
   return [...new Set(tokens)];
 }
 
+/** 解析唤醒词文本：支持换行 / 逗号 / 顿号分隔，去重并限制 20 个 */
+function parseWakeWords(): string[] {
+  const tokens = form.wakeWords
+    .split(/[\n,，、]/g)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  return [...new Set(tokens)].slice(0, 20);
+}
+
 /** 将当前表单状态保存回 providerConfigs，并构建完整 aiModel payload */
 function syncFormToProviderConfig(): void {
   const p = form.provider;
@@ -590,6 +614,11 @@ function buildSavePayload(): Record<string, unknown> {
     maxPending: Math.max(10, Number(form.maxPending || 100)),
     ignoreUsernames: form.ignoreUsernames,
     skipReplies: parseSkipRepliesText(),
+    wakeWords: parseWakeWords(),
+    contextSize: Math.max(0, Math.min(20, Math.floor(Number(form.contextSize) || 0))),
+    replyOnlyWhenAddressed: form.replyOnlyWhenAddressed === true,
+    replyMaxPerWindow: Math.max(0, Math.min(100, Math.floor(Number(form.replyMaxPerWindow) || 0))),
+    replyWindowMs: Math.max(1, Math.min(600, Math.floor(Number(form.replyWindowSec) || 60))) * 1000,
     providers: JSON.parse(JSON.stringify(providerConfigs)),
   };
 }
@@ -704,6 +733,15 @@ async function loadConfig() {
         ? ai.skipReplies
         : form.skipReplies;
       skipRepliesText.value = form.skipReplies.join("\n");
+      form.wakeWords = Array.isArray(ai.wakeWords) ? ai.wakeWords.join("\n") : form.wakeWords;
+      form.contextSize = Number.isFinite(Number(ai.contextSize)) ? Number(ai.contextSize) : form.contextSize;
+      form.replyOnlyWhenAddressed = ai.replyOnlyWhenAddressed === true;
+      form.replyMaxPerWindow = Number.isFinite(Number(ai.replyMaxPerWindow))
+        ? Number(ai.replyMaxPerWindow)
+        : form.replyMaxPerWindow;
+      form.replyWindowSec = Number.isFinite(Number(ai.replyWindowMs))
+        ? Math.max(1, Math.round(Number(ai.replyWindowMs) / 1000))
+        : form.replyWindowSec;
 
       // 恢复各供应商独立配置
       if (ai.providers && typeof ai.providers === "object") {
@@ -1188,9 +1226,46 @@ onUnmounted(() => {
     </div>
 
     <div class="card">
+      <h3 class="card-title">回复闸门</h3>
+      <p class="card-desc">
+        控制“什么情况下才值得回”。被闸门拦下的弹幕不会调用模型，但仍会进入上下文，模型看得到、只是不回复。
+      </p>
+
+      <label class="gate-row">
+        <input v-model="form.replyOnlyWhenAddressed" type="checkbox" />
+        <span>只回复 @你 / 主播的弹幕</span>
+      </label>
+      <div class="msg-inline gate-hint">
+        开启后，只有命中唤醒词的弹幕和主播发言才会进入回复流程，适合“叫我才说话”的观众号。
+      </div>
+
+      <div class="field field-inline-2 gate-fields">
+        <div>
+          <label class="field-label">每窗口最多回复</label>
+          <input v-model.number="form.replyMaxPerWindow" type="number" min="0" max="100" step="1" class="field-input" />
+          <div class="msg-inline">0 = 不限制</div>
+        </div>
+        <div>
+          <label class="field-label">窗口时长（秒）</label>
+          <input v-model.number="form.replyWindowSec" type="number" min="1" max="600" step="1" class="field-input" />
+          <div class="msg-inline">默认 60 秒</div>
+        </div>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn-accent" :disabled="saving" @click="handleSave">
+          {{ saving ? "保存中..." : "保存闸门设置" }}
+        </button>
+        <span v-if="saved" class="msg-inline msg-success">已保存</span>
+        <span v-if="errorMsg" class="msg-inline msg-error">{{ errorMsg }}</span>
+      </div>
+      <div class="msg-inline">修改后需要重新点「开始连接」才会生效。</div>
+    </div>
+
+    <div class="card">
       <h3 class="card-title">提示词配置</h3>
       <p class="card-desc">
-        这里输入大模型角色提示词。输入后会自动保存。点击“开始连接”后，程序会把该提示词作为会话初始化内容发送给模型。
+        这里输入大模型角色提示词。输入后会自动保存。点击“开始连接”后，程序会在每次请求时把该提示词作为系统消息发送给模型。
       </p>
       <p class="card-desc">
         提示词建议约定：<b>需要回复时输出最终弹幕文本；不需要回复时仅输出 NO_REPLY（或你在上方配置的标记）</b>。
@@ -1205,6 +1280,34 @@ onUnmounted(() => {
           rows="7"
           placeholder="例如：你现在是一个直播间助理..."
         ></textarea>
+      </div>
+
+      <div class="field">
+        <label class="field-label">唤醒词（弹幕出现即视为在叫你）</label>
+        <textarea
+          v-model="form.wakeWords"
+          class="field-input"
+          rows="3"
+          placeholder="每行一个，如：比小哩_"
+        ></textarea>
+        <div class="msg-inline">
+          不区分大小写、空格和 @；每个词至少 2 个字才生效，避免单字误判。留空则不做“对你说话”标记。
+        </div>
+      </div>
+
+      <div class="field">
+        <label class="field-label">上下文条数</label>
+        <input
+          v-model.number="form.contextSize"
+          type="number"
+          min="0"
+          max="20"
+          step="1"
+          class="field-input field-input-half"
+        />
+        <div class="msg-inline">
+          把最近几条弹幕和你的回复一起发给模型；0 = 关闭，每次只看当前一条。
+        </div>
       </div>
 
       <div class="btn-row">
@@ -1320,4 +1423,29 @@ onUnmounted(() => {
 
 <style scoped>
 @import "../styles/model-settings.css";
+
+.gate-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.gate-row input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.gate-hint {
+  margin: 6px 0 14px 23px;
+}
+
+.gate-fields {
+  margin-top: 4px;
+}
 </style>

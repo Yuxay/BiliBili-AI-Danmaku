@@ -102,6 +102,16 @@ export interface AIModelConfig {
   ignoreUsernames: string[];
   /** 跳过回复的关键词 */
   skipReplies: string[];
+  /** 唤醒词：弹幕中出现即视为在叫 AI（不区分大小写/空格/@） */
+  wakeWords: string[];
+  /** 滚动上下文条数：最近几条弹幕 + 自己的回复会一起发给模型。0=关闭 */
+  contextSize: number;
+  /** 回复闸门：只回复“对你说话”或主播的弹幕 */
+  replyOnlyWhenAddressed: boolean;
+  /** 回复闸门：时间窗口内最多回复几条，0=不限制 */
+  replyMaxPerWindow: number;
+  /** 回复闸门：时间窗口(ms) */
+  replyWindowMs: number;
   /** 各供应商独立配置映射 */
   providers: Record<string, ProviderConfig>;
 }
@@ -161,6 +171,12 @@ const schema: ConfigSchema = {
     maxPending: 100,
     ignoreUsernames: [],
     skipReplies: ["NO_REPLY", "无需回复", "不需要回复", "不用回复", "不回复", "忽略", "skip", "pass"],
+    // 唤醒词默认按本项目的 B 站账号「比小哩_」配置，换账号时在「提示词配置」里改
+    wakeWords: ["比小哩", "比小哩_", "小哩", "哩哩"],
+    contextSize: 6,
+    replyOnlyWhenAddressed: false,
+    replyMaxPerWindow: 3,
+    replyWindowMs: 60_000,
     providers: {
       opencode: {
         modelId: "mimo-v2.5-free",
@@ -421,8 +437,8 @@ export function getConfig(): ConfigSchema {
     runtimeWarmupPromptDisabledVersion: store.get("runtimeWarmupPromptDisabledVersion", schema.runtimeWarmupPromptDisabledVersion),
   };
 
-  // 迁移旧版 aiModel（扁平结构 → per-provider 结构）
-  raw.aiModel = migrateAIModel(raw.aiModel);
+  // 迁移旧版 aiModel（扁平结构 → per-provider 结构），并补齐新增字段的默认值
+  raw.aiModel = normalizeAIModel(migrateAIModel(raw.aiModel));
 
   return raw;
 }
@@ -448,6 +464,11 @@ function migrateAIModel(ai: any): AIModelConfig {
     maxPending: Number(ai.maxPending || schema.aiModel.maxPending),
     ignoreUsernames: ai.ignoreUsernames || [],
     skipReplies: ai.skipReplies || schema.aiModel.skipReplies,
+    wakeWords: Array.isArray(ai.wakeWords) ? ai.wakeWords : schema.aiModel.wakeWords,
+    contextSize: Number.isFinite(Number(ai.contextSize)) ? Number(ai.contextSize) : schema.aiModel.contextSize,
+    replyOnlyWhenAddressed: ai.replyOnlyWhenAddressed === true,
+    replyMaxPerWindow: Number.isFinite(Number(ai.replyMaxPerWindow)) ? Number(ai.replyMaxPerWindow) : schema.aiModel.replyMaxPerWindow,
+    replyWindowMs: Number.isFinite(Number(ai.replyWindowMs)) ? Number(ai.replyWindowMs) : schema.aiModel.replyWindowMs,
     providers: {
       opencode: {
         modelId: oldProvider === "opencode" ? (ai.modelId || "mimo-v2.5-free") : "mimo-v2.5-free",
@@ -480,6 +501,66 @@ function migrateAIModel(ai: any): AIModelConfig {
   }
 
   return migrated;
+}
+
+/**
+ * 补齐/校正 aiModel 中的新增字段（唤醒词 / 上下文 / 回复闸门）。
+ * 老版本配置文件没有这些字段，读取时统一回退到 schema 默认值，
+ * 避免下游拿到 undefined 后需要处处判空。
+ */
+function normalizeAIModel(ai: AIModelConfig): AIModelConfig {
+  const base = schema.aiModel;
+
+  const wakeWords = Array.isArray(ai.wakeWords)
+    ? ai.wakeWords
+        .filter((word): word is string => typeof word === "string")
+        .map((word) => word.trim())
+        .filter(Boolean)
+        .slice(0, 20)
+    : [...base.wakeWords];
+
+  const rawContextSize = Number(ai.contextSize);
+  const contextSize = Number.isFinite(rawContextSize)
+    ? Math.max(0, Math.min(20, Math.floor(rawContextSize)))
+    : base.contextSize;
+
+  const rawReplyMax = Number(ai.replyMaxPerWindow);
+  const replyMaxPerWindow = Number.isFinite(rawReplyMax)
+    ? Math.max(0, Math.min(100, Math.floor(rawReplyMax)))
+    : base.replyMaxPerWindow;
+
+  const rawReplyWindow = Number(ai.replyWindowMs);
+  const replyWindowMs = Number.isFinite(rawReplyWindow)
+    ? Math.max(1000, Math.min(600_000, Math.floor(rawReplyWindow)))
+    : base.replyWindowMs;
+
+  return {
+    provider: typeof ai.provider === "string" && ai.provider ? ai.provider : base.provider,
+    prompt: typeof ai.prompt === "string" ? ai.prompt : base.prompt,
+    sendIntervalMs: Number.isFinite(Number(ai.sendIntervalMs))
+      ? Number(ai.sendIntervalMs)
+      : base.sendIntervalMs,
+    maxPending: Number.isFinite(Number(ai.maxPending))
+      ? Number(ai.maxPending)
+      : base.maxPending,
+    ignoreUsernames: Array.isArray(ai.ignoreUsernames)
+      ? ai.ignoreUsernames.filter((name): name is string => typeof name === "string")
+      : [],
+    skipReplies:
+      Array.isArray(ai.skipReplies) && ai.skipReplies.length > 0
+        ? ai.skipReplies.filter((item): item is string => typeof item === "string")
+        : [...base.skipReplies],
+    wakeWords,
+    contextSize,
+    replyOnlyWhenAddressed:
+      typeof ai.replyOnlyWhenAddressed === "boolean"
+        ? ai.replyOnlyWhenAddressed
+        : base.replyOnlyWhenAddressed,
+    replyMaxPerWindow,
+    replyWindowMs,
+    providers:
+      ai.providers && typeof ai.providers === "object" ? ai.providers : base.providers,
+  };
 }
 
 /** 设置顶层配置键值（类型安全） */
@@ -561,8 +642,9 @@ export function exportConfigToFile(
   options?: { includeSensitive?: boolean }
 ): { status: string; path?: string; error?: string } {
   try {
-    const config = store.store;
-    const ai = config.aiModel || {};
+    // 用 getConfig() 而不是 store.store：导出的是补齐默认值后的有效配置
+    const config = getConfig();
+    const ai = config.aiModel;
     const includeSensitive = options?.includeSensitive === true;
 
     // 脱敏处理：不包含敏感信息时清空凭证和密钥字段
@@ -601,6 +683,11 @@ export function exportConfigToFile(
         maxPending: ai.maxPending,
         ignoreUsernames: ai.ignoreUsernames,
         skipReplies: ai.skipReplies,
+        wakeWords: ai.wakeWords,
+        contextSize: ai.contextSize,
+        replyOnlyWhenAddressed: ai.replyOnlyWhenAddressed,
+        replyMaxPerWindow: ai.replyMaxPerWindow,
+        replyWindowMs: ai.replyWindowMs,
         providers: exportedProviders,
       },
       closeWindowBehavior: config.closeWindowBehavior || "ask",
@@ -662,6 +749,19 @@ function sanitizeImportedAIModel(raw: unknown): AIModelConfig {
     maxPending: Number.isFinite(Number(src.maxPending)) && Number(src.maxPending) > 0 ? Number(src.maxPending) : base.maxPending,
     ignoreUsernames: Array.isArray(src.ignoreUsernames) ? src.ignoreUsernames.filter((x): x is string => typeof x === "string") : [],
     skipReplies: Array.isArray(src.skipReplies) ? src.skipReplies.filter((x): x is string => typeof x === "string") : base.skipReplies,
+    wakeWords: Array.isArray(src.wakeWords)
+      ? src.wakeWords.filter((x): x is string => typeof x === "string").map((x) => x.trim()).filter(Boolean).slice(0, 20)
+      : [...base.wakeWords],
+    contextSize: Number.isFinite(Number(src.contextSize))
+      ? Math.max(0, Math.min(20, Math.floor(Number(src.contextSize))))
+      : base.contextSize,
+    replyOnlyWhenAddressed: typeof src.replyOnlyWhenAddressed === "boolean" ? src.replyOnlyWhenAddressed : base.replyOnlyWhenAddressed,
+    replyMaxPerWindow: Number.isFinite(Number(src.replyMaxPerWindow))
+      ? Math.max(0, Math.min(100, Math.floor(Number(src.replyMaxPerWindow))))
+      : base.replyMaxPerWindow,
+    replyWindowMs: Number.isFinite(Number(src.replyWindowMs))
+      ? Math.max(1000, Math.min(600_000, Math.floor(Number(src.replyWindowMs))))
+      : base.replyWindowMs,
     providers,
   };
 }

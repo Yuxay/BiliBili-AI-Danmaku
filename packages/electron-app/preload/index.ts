@@ -61,6 +61,16 @@ export interface AIModelConfig {
   maxPending: number;
   ignoreUsernames: string[];
   skipReplies: string[];
+  /** 唤醒词：弹幕中出现即视为在叫 AI（不区分大小写/空格/@） */
+  wakeWords: string[];
+  /** 滚动上下文条数：最近几条弹幕 + 自己的回复会一起发给模型。0=关闭 */
+  contextSize: number;
+  /** 回复闸门：只回复 @你 / 主播的弹幕 */
+  replyOnlyWhenAddressed: boolean;
+  /** 回复闸门：时间窗口内最多回复几条，0=不限制 */
+  replyMaxPerWindow: number;
+  /** 回复闸门：时间窗口(ms) */
+  replyWindowMs: number;
   providers: Record<string, ProviderConfig>;
 }
 

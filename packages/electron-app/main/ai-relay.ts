@@ -5,6 +5,14 @@
 // ============================================================
 
 import { EventEmitter } from "events";
+import {
+  buildSystemPrompt,
+  DanmakuContextBuffer,
+  formatDanmakuForModel,
+  isRepeatedReply,
+  trimReplyForDanmaku,
+  WakeWordMatcher,
+} from "./ai-context";
 
 // ─── 类型定义 ─────────────────────────────────────────────
 
@@ -47,6 +55,16 @@ export interface AIRelayConfig {
   ollamaKeepAlive?: string;
   /** 单次请求超时(ms)。Ollama 本地推理较慢建议 ≥ 120000，云端 API 30000 即可 */
   requestTimeoutMs?: number;
+  /** 唤醒词：弹幕中出现即标记为「对你说话」，并用于拼接身份提示 */
+  wakeWords?: string[];
+  /** 滚动上下文条数：把最近几条弹幕 + 自己的回复一起发给模型。0=关闭 */
+  contextSize?: number;
+  /** 回复闸门：只回复“对你说话”或主播的弹幕 */
+  replyOnlyWhenAddressed?: boolean;
+  /** 回复闸门：时间窗口内最多回复几条，0=不限制 */
+  replyMaxPerWindow?: number;
+  /** 回复闸门：时间窗口(ms) */
+  replyWindowMs?: number;
 }
 
 /** 编译后的跳过规则：纯文本或正则 */
@@ -136,11 +154,6 @@ function compileSkipRules(entries: string[]): SkipRule[] {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function clampText(text: string, maxLen = 40): string {
-  const normalized = String(text || "").replace(/\s+/g, " ").trim();
-  return normalized.length <= maxLen ? normalized : normalized.slice(0, maxLen);
 }
 
 function normalizeAnyText(value: unknown): string | null {
@@ -275,6 +288,18 @@ export class AIRelayManager extends EventEmitter {
   private failedCount = 0;
   private lastError: string | null = null;
 
+  /** 唤醒词匹配器（连接时按配置重建） */
+  private wakeMatcher = new WakeWordMatcher();
+  /** 滚动上下文缓冲（连接时按配置重建） */
+  private contextBuffer = new DanmakuContextBuffer(0);
+  /** 主播 uid / 昵称：用于给主播发言加 [主播] 标记 */
+  private anchorUid = 0;
+  private anchorName = "";
+  /** 最近发送成功的回复，用于判断是否重复 */
+  private recentSentReplies: string[] = [];
+  /** 最近发送时间戳（升序），用于回复闸门的频率限制 */
+  private replyTimestamps: number[] = [];
+
   /** 追踪最近发送的消息，避免 AI 回复自己的消息（防 echo 循环） */
   private readonly echoGuards: Array<{ text: string; expiresAt: number; remaining: number }> = [];
   /** 最近决策记录，环形缓冲区（max 50），供 UI 预览 */
@@ -302,6 +327,8 @@ export class AIRelayManager extends EventEmitter {
 
     const rawInterval = Number(config.sendIntervalMs) || 1800;
     const rawMaxPending = Number(config.maxPending) || 100;
+    const rawReplyMax = Number(config.replyMaxPerWindow);
+    const rawReplyWindow = Number(config.replyWindowMs);
 
     const normalized: AIRelayConfig = {
       ...config,
@@ -312,6 +339,17 @@ export class AIRelayManager extends EventEmitter {
       skipReplies: Array.isArray(config.skipReplies)
         ? config.skipReplies.map((x) => String(x ?? "").trim()).filter(Boolean)
         : [...DEFAULT_SKIP_REPLIES],
+      wakeWords: Array.isArray(config.wakeWords)
+        ? config.wakeWords.map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 20)
+        : [],
+      contextSize: Math.max(0, Math.min(50, Math.floor(Number(config.contextSize) || 0))),
+      replyOnlyWhenAddressed: config.replyOnlyWhenAddressed === true,
+      replyMaxPerWindow: Number.isFinite(rawReplyMax)
+        ? Math.max(0, Math.min(100, Math.floor(rawReplyMax)))
+        : 0,
+      replyWindowMs: Number.isFinite(rawReplyWindow)
+        ? Math.max(1000, Math.min(600_000, Math.floor(rawReplyWindow)))
+        : 60_000,
     };
 
     if (normalized.skipReplies.length === 0) {
@@ -319,6 +357,10 @@ export class AIRelayManager extends EventEmitter {
     }
 
     this.compiledSkipRules = compileSkipRules(normalized.skipReplies);
+    this.wakeMatcher = new WakeWordMatcher(normalized.wakeWords);
+    this.contextBuffer = new DanmakuContextBuffer(normalized.contextSize);
+    this.recentSentReplies = [];
+    this.replyTimestamps = [];
 
     if (!normalized.provider || !normalized.modelId || !normalized.endpoint) {
       throw new Error("请先完整保存模型供应商配置");
@@ -358,8 +400,26 @@ export class AIRelayManager extends EventEmitter {
     this.processing = false;
     this.queue = [];
     this.echoGuards.length = 0;
+    this.contextBuffer.clear();
+    this.recentSentReplies = [];
+    this.replyTimestamps = [];
     this.lastSendAt = 0;
     this.emitStatus();
+  }
+
+  /**
+   * 更新主播身份。uid 用于给主播发言加 [主播] 标记，昵称用于系统提示。
+   * 传入 uid<=0 表示清除（例如断开直播间时）。
+   */
+  setAnchorIdentity(anchorUid: number, anchorName = ""): void {
+    const uid = Number(anchorUid);
+    if (!Number.isFinite(uid) || uid <= 0) {
+      this.anchorUid = 0;
+      this.anchorName = "";
+      return;
+    }
+    this.anchorUid = uid;
+    this.anchorName = String(anchorName || "").trim();
   }
 
   /** 手动清空待发送队列 */
@@ -456,12 +516,18 @@ export class AIRelayManager extends EventEmitter {
   }
 
   private formatForModel(danmaku: RelayDanmaku): string {
-    const medal = danmaku.sender.medal?.name
-      ? `${danmaku.sender.medal.name}${danmaku.sender.medal.level ? ` ${danmaku.sender.medal.level}` : ""}`
-      : "无粉丝牌";
-    const guard = danmaku.sender.guard_title || "";
-    const username = danmaku.sender.username || "匿名用户";
-    return `${guard ? `${guard} | ` : ""}粉丝牌:${medal} | 用户名:${username} | 弹幕:${danmaku.content}`;
+    return formatDanmakuForModel(
+      {
+        content: danmaku.content ?? "",
+        username: danmaku.sender?.username,
+        uid: danmaku.sender?.uid,
+        guardTitle: danmaku.sender?.guard_title,
+        medal: danmaku.sender?.medal
+          ? { name: danmaku.sender.medal.name, level: danmaku.sender.medal.level }
+          : null,
+      },
+      { anchorUid: this.anchorUid, wakeMatcher: this.wakeMatcher },
+    );
   }
 
   private normalizeText(text: string): string {
@@ -539,6 +605,66 @@ export class AIRelayManager extends EventEmitter {
     }
   }
 
+  /** 记录最近发送成功的回复，用于拦截重复内容（防止同一句话刷屏） */
+  private rememberSentReply(text: string): void {
+    const normalized = this.normalizeText(text);
+    if (!normalized) return;
+    this.recentSentReplies.push(normalized);
+    if (this.recentSentReplies.length > 5) this.recentSentReplies.shift();
+  }
+
+  /** 记录一次成功发送的时间，供回复闸门统计频率 */
+  private rememberReplyTime(): void {
+    this.replyTimestamps.push(Date.now());
+    if (this.replyTimestamps.length > 100) this.replyTimestamps.shift();
+  }
+
+  /**
+   * 回复闸门：在调用模型之前判断这条弹幕是否值得回。
+   * - 只回 @你/主播：非定向弹幕直接跳过（不调用模型，省 token）
+   * - 频率限制：窗口内发送数达到上限后跳过
+   * 被拦截的弹幕仍会进入滚动上下文，模型能看到聊天内容，只是不回复。
+   */
+  private evaluateReplyGate(danmaku: RelayDanmaku): { allowed: boolean; reason: string } {
+    const config = this.config;
+    if (!config) return { allowed: false, reason: "未连接模型" };
+
+    if (config.replyOnlyWhenAddressed) {
+      const uid = Number(danmaku.sender?.uid || 0);
+      const addressedByWord = this.wakeMatcher.matches(danmaku.content || "");
+      const addressedByAnchor = this.anchorUid > 0 && uid === this.anchorUid;
+      if (!addressedByWord && !addressedByAnchor) {
+        return { allowed: false, reason: "回复闸门：只回复 @你 / 主播的弹幕，本条已跳过" };
+      }
+    }
+
+    const maxPerWindow = Math.floor(Number(config.replyMaxPerWindow) || 0);
+    const windowMs = Math.floor(Number(config.replyWindowMs) || 0);
+    if (maxPerWindow > 0 && windowMs > 0) {
+      const now = Date.now();
+      const cutoff = now - windowMs;
+      while (this.replyTimestamps.length > 0 && this.replyTimestamps[0] <= cutoff) {
+        this.replyTimestamps.shift();
+      }
+      if (this.replyTimestamps.length >= maxPerWindow) {
+        const seconds = Math.max(1, Math.round(windowMs / 1000));
+        return {
+          allowed: false,
+          reason: `回复闸门：${seconds} 秒内已回复 ${this.replyTimestamps.length} 条（上限 ${maxPerWindow}）`,
+        };
+      }
+    }
+
+    return { allowed: true, reason: "" };
+  }
+
+  /** 闸门拦截记录：连续相同原因只保留一条，避免把预览列表刷满 */
+  private pushGateDecision(decision: AIReplyDecision): void {
+    const last = this.recentDecisions[0];
+    if (last && last.action === "skipped" && last.reason === decision.reason) return;
+    this.pushDecision(decision);
+  }
+
   /**
    * 队列处理主循环。
    * 逐条取出弹幕 → 调用 AI → skip 判断 → 节流发送。
@@ -572,9 +698,31 @@ export class AIRelayManager extends EventEmitter {
           const modelInput = this.formatForModel(item.danmaku);
           const decisionId = `d-${item.seq}-${Date.now()}`;
 
+          // 闸门在调用模型之前拦截：不满足条件就不花 token
+          const gate = this.evaluateReplyGate(item.danmaku);
+          if (!gate.allowed) {
+            this.skippedCount += 1;
+            this.queue.shift();
+            this.lastError = null;
+            this.contextBuffer.push({ input: modelInput, reply: null });
+            this.pushGateDecision({
+              id: decisionId,
+              timestamp: Date.now(),
+              input: modelInput,
+              output: "",
+              action: "skipped",
+              reason: gate.reason,
+            });
+            this.emitStatus();
+            continue;
+          }
+
+          // 最近几条弹幕 + 自己的回复，一起作为本次请求的上下文
+          const userContent = this.contextBuffer.buildUserContent(modelInput);
+
           // 思考型/隐身思考模型可能在 reasoning 耗尽预算导致正文为空，
           // askModelWithRetry 按 2048→4096→8192 递增预算重试（握手与弹幕路径共用）。
-          const rawResponse = await this.askModelWithRetry(this.config, modelInput);
+          const rawResponse = await this.askModelWithRetry(this.config, userContent);
 
           // 提取回复文本（思考标签在 extractReplyText 内统一清理）
           const replyText = extractReplyText(rawResponse, this.config.provider);
@@ -586,14 +734,26 @@ export class AIRelayManager extends EventEmitter {
               `响应预览: ${shortPreview}`,
             );
           }
-          const text = clampText(replyText, 40);
+          const text = trimReplyForDanmaku(replyText, 40);
 
           const skip = this.shouldSkipReply(text);
           if (skip.skip) {
             this.skippedCount += 1;
             this.queue.shift();
             this.lastError = null;
+            this.contextBuffer.push({ input: modelInput, reply: null });
             this.pushDecision({ id: decisionId, timestamp: Date.now(), input: modelInput, output: text, action: "skipped", reason: skip.reason });
+            this.emitStatus();
+            continue;
+          }
+
+          // 与最近发送过的回复重复时跳过，避免同一句话刷屏
+          if (isRepeatedReply(text, this.recentSentReplies)) {
+            this.skippedCount += 1;
+            this.queue.shift();
+            this.lastError = null;
+            this.contextBuffer.push({ input: modelInput, reply: null });
+            this.pushDecision({ id: decisionId, timestamp: Date.now(), input: modelInput, output: text, action: "skipped", reason: "与最近发送的回复重复，已跳过" });
             this.emitStatus();
             continue;
           }
@@ -607,6 +767,9 @@ export class AIRelayManager extends EventEmitter {
 
           await this.sendDanmaku(text);
           this.rememberOutgoing(text);
+          this.rememberSentReply(text);
+          this.rememberReplyTime();
+          this.contextBuffer.push({ input: modelInput, reply: text });
           this.lastSendAt = Date.now();
           this.sentCount += 1;
           this.lastError = null;
@@ -764,6 +927,11 @@ export class AIRelayManager extends EventEmitter {
       ? Math.min(2, Math.max(0, rawTemperature))
       : 0.7;
     const topP = config.topP != null ? Number(config.topP) : undefined;
+    // 运行时身份提示（唤醒词 / 主播昵称）拼在用户提示词之后
+    const systemPrompt = buildSystemPrompt(config.prompt, {
+      wakeWords: config.wakeWords,
+      anchorName: this.anchorName,
+    });
 
     if (isOllama && config.ollamaKeepAlive) {
       headers["X-Ollama-Keep-Alive"] = config.ollamaKeepAlive;
@@ -774,7 +942,7 @@ export class AIRelayManager extends EventEmitter {
       ? {
           model: config.modelId,
           input: [
-            { role: "system", content: [{ type: "input_text", text: config.prompt }] },
+            { role: "system", content: [{ type: "input_text", text: systemPrompt }] },
             { role: "user", content: [{ type: "input_text", text: userInput }] },
           ],
           max_output_tokens: maxTokens,
@@ -782,7 +950,7 @@ export class AIRelayManager extends EventEmitter {
       : {
           model: config.modelId,
           messages: [
-            { role: "system", content: config.prompt },
+            { role: "system", content: systemPrompt },
             { role: "user", content: userInput },
           ],
           max_tokens: maxTokens,
@@ -803,10 +971,22 @@ export class AIRelayManager extends EventEmitter {
       "Content-Type": "application/json",
       "anthropic-version": "2023-06-01",
     };
+    const rawTemperature = Number(config.temperature);
+    // Anthropic 的 temperature 范围是 0~1，超范围会被拒绝
+    const temperature = Number.isFinite(rawTemperature)
+      ? Math.min(1, Math.max(0, rawTemperature))
+      : 0.7;
+    const topP = Number(config.topP);
+    const systemPrompt = buildSystemPrompt(config.prompt, {
+      wakeWords: config.wakeWords,
+      anchorName: this.anchorName,
+    });
     const body = {
       model: config.modelId,
-      system: config.prompt,
+      system: systemPrompt,
       max_tokens: this.resolveMaxTokens(config, maxTokensOverride),
+      temperature,
+      ...(Number.isFinite(topP) ? { top_p: topP } : {}),
       messages: [{ role: "user", content: userInput }],
     };
     return this.postJson(endpoint, headers, body);

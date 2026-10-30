@@ -149,6 +149,8 @@ let latestAIStatus: AIRelayStatus = {
 
 let cachedDashboardRoomProfile: DashboardRoomProfilePayload | null = null;
 let cachedDashboardRoomProfileRoomId = 0;
+/** 主播身份缓存：uid 用于给 AI 输入里的主播发言加 [主播] 标记 */
+let cachedAnchorIdentity: { roomId: number; uid: number; name: string } | null = null;
 let danmakuRuntimeWarmed = false;
 let rendererReadyNotified = false;
 let rendererReadyListenerRegistered = false;
@@ -279,6 +281,14 @@ async function buildDashboardRoomProfile(): Promise<DashboardRoomProfilePayload>
       avatar: avatarDataUrl || avatarUrl,
     };
 
+    // 顺手缓存主播身份，AI 端无需再单独起一次查询
+    const anchorUid = Number(data.anchor_uid || 0);
+    if (anchorUid > 0) {
+      const anchorName = String(data.anchor_name || "").trim();
+      cachedAnchorIdentity = { roomId: currentRoomId, uid: anchorUid, name: anchorName };
+      aiRelay?.setAnchorIdentity(anchorUid, anchorName);
+    }
+
     cachedDashboardRoomProfile = { ...profile };
     cachedDashboardRoomProfileRoomId = currentRoomId;
     return profile;
@@ -297,6 +307,43 @@ async function buildDashboardRoomProfile(): Promise<DashboardRoomProfilePayload>
       roomId: currentRoomId,
     };
   }
+}
+
+/**
+ * 查询并缓存主播身份（uid + 昵称），供 AI 给主播发言加 [主播] 标记。
+ * 复用 anchor-profile 子进程查询；失败只记日志，不影响弹幕链路。
+ */
+async function refreshAnchorIdentity(roomId: number): Promise<void> {
+  const normalizedRoomId = Math.max(0, Number(roomId || 0));
+  if (normalizedRoomId <= 0) return;
+
+  // dashboard 已经查过同一房间时直接复用缓存，避免重复启动 Python 子进程
+  if (cachedAnchorIdentity && cachedAnchorIdentity.roomId === normalizedRoomId && cachedAnchorIdentity.uid > 0) {
+    aiRelay?.setAnchorIdentity(cachedAnchorIdentity.uid, cachedAnchorIdentity.name);
+    return;
+  }
+
+  try {
+    const data = await fetchAnchorProfileByPython(normalizedRoomId, __dirname, getConfig().credentials);
+    const uid = Number(data.anchor_uid || 0);
+    if (uid <= 0) return;
+
+    const name = String(data.anchor_name || "").trim();
+    cachedAnchorIdentity = { roomId: normalizedRoomId, uid, name };
+    aiRelay?.setAnchorIdentity(uid, name);
+    logger.log("[AI] anchor identity ready", { roomId: normalizedRoomId, uid, name });
+  } catch (e) {
+    logger.warn("[AI] anchor identity fetch failed", {
+      roomId: normalizedRoomId,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+
+/** 清除主播身份（断开直播间时调用，避免把新房间的弹幕误标成主播） */
+function clearAnchorIdentity(): void {
+  cachedAnchorIdentity = null;
+  aiRelay?.setAnchorIdentity(0, "");
 }
 
 const dashboardMetricsStore = createDashboardMetricsStore();
@@ -863,6 +910,8 @@ function registerIpcHandlers(): void {
     }
 
     await danmakuService.start(config);
+    // 连接成功后异步拉取主播身份（不阻塞启动）
+    void refreshAnchorIdentity(Number(config?.roomId || 0));
     // 连接成功后启动下播检测（功能关闭时不发起查询，打开开关后无需重连）
     liveStatusWatcher?.start(Number(config?.roomId || 0));
     return { status: "ok" };
@@ -889,6 +938,7 @@ function registerIpcHandlers(): void {
       }
       await danmakuService.stop();
     }
+    clearAnchorIdentity();
     disconnectAIWhenDanmakuStops();
     return { status: "ok" };
   });
