@@ -483,14 +483,21 @@ export class AIRelayManager extends EventEmitter {
         } catch { /* 正则执行异常时跳过此规则 */ }
         continue;
       }
-      if (collapsed === rule.literal) return { skip: true, reason: `命中跳过标记: ${rule.raw}` };
-      if (
-        collapsed.startsWith(`${rule.literal}:`) ||
-        collapsed.startsWith(`${rule.literal}：`) ||
-        collapsed.startsWith(`[${rule.literal}]`) ||
-        collapsed.startsWith(`【${rule.literal}】`)
-      ) {
+      // 完全命中，或命中标记后没有紧跟“同类字符”。
+      // 英文标记（NO_REPLY/skip/pass）后面出现中文或标点都算命中，
+      // 因为模型常写成“NO_REPLY（这条不用回）”；但不能把 “passionate” 当成 “pass”。
+      if (collapsed.startsWith(`[${rule.literal}]`) || collapsed.startsWith(`【${rule.literal}】`)) {
         return { skip: true, reason: `命中跳过标记: ${rule.raw}` };
+      }
+      if (collapsed.startsWith(rule.literal)) {
+        const nextChar = collapsed.slice(rule.literal.length, rule.literal.length + 1);
+        const isAsciiMarker = /^[a-z0-9_]+$/.test(rule.literal);
+        const continuesWord = isAsciiMarker
+          ? /[a-z0-9_]/i.test(nextChar)
+          : /[\p{L}\p{N}]/u.test(nextChar);
+        if (!nextChar || !continuesWord) {
+          return { skip: true, reason: `命中跳过标记: ${rule.raw}` };
+        }
       }
     }
     // 防御：代码模型（north-mini-code 等）有时返回代码片段而非弹幕回复。
@@ -751,7 +758,11 @@ export class AIRelayManager extends EventEmitter {
 
     const isOllama = this.isOllamaProvider(config.provider);
     const maxTokens = this.resolveMaxTokens(config, maxTokensOverride);
-    const temperature = Number(config.temperature) || 0.7;
+    const rawTemperature = Number(config.temperature);
+    // 允许显式设置为 0：旧写法 `Number(x) || 0.7` 会把 0 吞成 0.7
+    const temperature = Number.isFinite(rawTemperature)
+      ? Math.min(2, Math.max(0, rawTemperature))
+      : 0.7;
     const topP = config.topP != null ? Number(config.topP) : undefined;
 
     if (isOllama && config.ollamaKeepAlive) {
