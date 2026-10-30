@@ -19,6 +19,7 @@ import {
 } from "./danmaku-service";
 import { getConfig, setConfigPath, type CloseWindowBehavior } from "./config-store";
 import { AIRelayManager, type AIRelayStatus } from "./ai-relay";
+import { LiveStatusWatcher } from "./live-status-watcher";
 import { QuickReplyEngine } from "./quick-reply-engine";
 import type { MainAppContext } from "./app-context";
 import { logger } from "./logger";
@@ -116,6 +117,8 @@ let biliLoginWindow: BrowserWindow | null = null;
 let mainWindow: BrowserWindow | null = null;
 /** Python 弹幕子进程管理 */
 let danmakuService: DanmakuService | null = null;
+/** 下播自动断开检测器（连接期间轮询开播状态） */
+let liveStatusWatcher: LiveStatusWatcher | null = null;
 /** AI 大模型中继管理器 */
 let aiRelay: AIRelayManager | null = null;
 /** 固定回复引擎 */
@@ -375,6 +378,9 @@ async function cleanupBeforeExit(): Promise<void> {
   try {
     clearWarmupTimers();
 
+    // 先停止下播检测轮询，避免退出阶段仍发起直播状态查询
+    liveStatusWatcher?.stop();
+
     if (danmakuService) {
       try {
         // 退出以响应速度优先：若优雅停止超时，后续由兜底清理继续收敛残留。
@@ -562,6 +568,72 @@ function registerIpcHandlers(): void {
     aiRelay.disconnect();
     latestAIStatus = aiRelay.getStatus();
   };
+
+  /** 下播自动断开：确认主播下播后停止监听（含告别弹幕尽力发送） */
+  let liveEndAutoStopRunning = false;
+
+  const autoStopAfterLiveEnd = async (roomId: number): Promise<void> => {
+    if (liveEndAutoStopRunning) return;
+    liveEndAutoStopRunning = true;
+    try {
+      const service = danmakuService;
+      if (!service) return;
+
+      // 已确认下播，停止后续轮询
+      liveStatusWatcher?.stop();
+
+      const roomConfig = getConfig().room;
+      const farewell = String(roomConfig?.disconnectMessage || "").trim();
+      if (roomConfig?.sendOnDisconnect === true && farewell) {
+        // 直播间已下播，告别弹幕只做尽力尝试，最多等待 5s，避免阻塞断开流程
+        try {
+          await Promise.race([
+            service.sendDanmaku({ msg: farewell }),
+            new Promise<void>((resolve) => {
+              const timer = setTimeout(() => resolve(), 5000);
+              timer.unref?.();
+            }),
+          ]);
+        } catch {
+          // 下播后发送失败属于预期情况
+        }
+      }
+
+      await service.stop();
+      disconnectAIWhenDanmakuStops();
+      logger.log("[LiveStatus] auto disconnected after live end", { roomId });
+
+      mainWindow?.webContents.send("danmaku:liveEnded", {
+        roomId,
+        message: "主播已下播，已自动断开连接",
+      });
+    } catch (e) {
+      logger.warn("[LiveStatus] auto disconnect failed", {
+        roomId,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      liveEndAutoStopRunning = false;
+    }
+  };
+
+  /**
+   * 下播检测器：
+   * - 连接直播间后启动轮询，断开时停止
+   * - 配置开关关闭时只保留轮询、不发起查询（打开后无需重连即可生效）
+   */
+  if (!liveStatusWatcher) {
+    liveStatusWatcher = new LiveStatusWatcher({
+      fetchLiveStatus: async (roomId) => {
+        if (!danmakuService) return null;
+        return danmakuService.getLiveStatus(roomId);
+      },
+      isEnabled: () => getConfig().room?.autoStopWhenLiveEnds === true,
+      onLiveEnded: (roomId) => {
+        void autoStopAfterLiveEnd(roomId);
+      },
+    });
+  }
 
   // 高频事件降压：批量下发弹幕/礼物/SC，减少 renderer IPC 频次
   const STREAM_BATCH_INTERVAL_MS = 120;
@@ -768,6 +840,7 @@ function registerIpcHandlers(): void {
         mainWindow?.webContents.send("danmaku:connected", data);
       });
       danmakuService.on("disconnected", (data) => {
+        liveStatusWatcher?.stop();
         mainWindow?.webContents.send("danmaku:disconnected", data);
         disconnectAIWhenDanmakuStops();
       });
@@ -790,11 +863,14 @@ function registerIpcHandlers(): void {
     }
 
     await danmakuService.start(config);
+    // 连接成功后启动下播检测（功能关闭时不发起查询，打开开关后无需重连）
+    liveStatusWatcher?.start(Number(config?.roomId || 0));
     return { status: "ok" };
   });
 
   /** 停止弹幕监听，可选在停止前发送告别消息 */
   ipcMain.handle("danmaku:stop", async (_event, options?: { sendBeforeStop?: boolean; message?: string; cancelStart?: boolean }) => {
+    liveStatusWatcher?.stop();
     if (danmakuService) {
       if (options?.cancelStart && danmakuService.isStartInProgress()) {
         danmakuService.abortStart("用户取消连接");

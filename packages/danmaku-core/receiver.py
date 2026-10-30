@@ -376,6 +376,40 @@ class BilibiliDanmakuClient:
         """
         return {"connected": self._connected, "roomId": self._room_id}
 
+    async def get_live_status(self, params: dict) -> dict:
+        """查询直播间开播状态（供 Node 侧下播自动断开检测轮询）。
+
+        输入：
+        - roomId: 直播间号（可选，缺省使用当前连接房间）
+
+        返回：
+        - liveStatus: B站 live_status（0=未开播 1=直播中 2=轮播）
+
+        说明：
+        - bilibili_api 延迟导入，避免拖慢 receiver 启动与 warmup。
+        - 查询失败（网络/风控/接口变更）统一抛出异常，由 Node 侧视为“未知”，
+          不会据此判定下播，避免误断开。
+        """
+        room_id = int(params.get("roomId") or self._room_id or 0)
+        if room_id <= 0:
+            raise ValueError("roomId is required")
+
+        from bilibili_api import Credential, live as bilibili_live
+
+        credential = Credential(
+            sessdata=self._credentials.get("sessdata") or None,
+            bili_jct=self._credentials.get("biliJct") or None,
+            buvid3=self._credentials.get("buvid3") or None,
+        )
+        room = bilibili_live.LiveRoom(room_display_id=room_id, credential=credential)
+        play_info = await asyncio.wait_for(room.get_room_play_info(), timeout=10)
+
+        return {
+            "roomId": room_id,
+            "roomIdReal": int(play_info.get("room_id") or 0),
+            "liveStatus": int(play_info.get("live_status") or 0),
+        }
+
 
 class _DanmakuHandler:
     """弹幕事件处理器。
@@ -847,6 +881,7 @@ async def main():
     rpc.register_method("start", danmaku_client.start)
     rpc.register_method("stop", danmaku_client.stop)
     rpc.register_method("getStatus", danmaku_client.get_status)
+    rpc.register_method("getLiveStatus", danmaku_client.get_live_status)
     rpc.register_method("sendDanmaku", danmaku_sender.send)
 
     # 启动确认放在运行时，避免模块导入副作用污染 warmup/stdout。

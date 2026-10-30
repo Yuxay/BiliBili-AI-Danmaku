@@ -797,6 +797,30 @@ export class DanmakuService extends EventEmitter {
   }
 
   /**
+   * 查询当前直播间开播状态（供下播自动断开检测轮询）。
+   * 返回 B站 live_status：0=未开播 1=直播中 2=轮播；
+   * 进程不可用或查询失败时返回 null（调用方视为“未知”，不判定下播）。
+   */
+  async getLiveStatus(roomId?: number): Promise<number | null> {
+    const targetRoomId = Number(roomId || this.config?.roomId || 0);
+    if (targetRoomId <= 0) return null;
+    if (!this.isProcessAlive(this.process)) return null;
+
+    try {
+      // 轮询请求使用较短超时，避免长时间占用 pending 队列
+      const result = await this.request("getLiveStatus", { roomId: targetRoomId }, 12_000);
+      const liveStatus = Number((result as { liveStatus?: unknown } | null)?.liveStatus);
+      return Number.isFinite(liveStatus) ? liveStatus : null;
+    } catch (e) {
+      logger.warn("DanmakuService.getLiveStatus failed", {
+        roomId: targetRoomId,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return null;
+    }
+  }
+
+  /**
    * 处理 Python 子进程的 stdout 输出。
    * 按行解析 JSON，支持三种协议格式：
    *   1) JSON-RPC 2.0 response（含 id + result/error）→ 匹配 pending 请求

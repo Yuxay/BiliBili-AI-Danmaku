@@ -29,6 +29,7 @@
 - 🤖 **大模型回复** — 对接 OpenAI 兼容 API + 本地 Ollama，支持自定义 Prompt、发送间隔、队列上限、跳过规则
 - ⚡ **固定回复引擎** — 关键词命中后直接发送预设回复，优先级高于 AI，低延迟无等待
 - 🔑 **B站一键登录** — 内置 B站扫码登录弹窗，自动提取 Cookie，无需手动复制
+- 🛑 **下播自动断开** — 可选开启，检测到主播下播（非直播中）后自动停止监听并断开 AI
 
 ### 直播间仪表板
 - 📊 **实时仪表板** — 主播资料卡片、弹幕流、关键词命中统计、AI 队列状态一目了然
@@ -259,7 +260,8 @@ pnpm package:clean
     "minMedalLevel": 0,
     "captureEnabled": true,
     "sendOnDisconnect": true,
-    "disconnectMessage": "先下播啦，感谢大家陪伴，我们下次见～"
+    "disconnectMessage": "先下播啦，感谢大家陪伴，我们下次见～",
+    "autoStopWhenLiveEnds": false
   },
   "credentials": {
     "sessdata": "***",

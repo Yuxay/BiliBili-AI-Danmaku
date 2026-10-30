@@ -364,6 +364,7 @@
     <tr><td>停止监听</td><td>断开连接，可选发送告别弹幕</td></tr>
     <tr><td>断开前发送告别弹幕</td><td>勾选后，停止监听前自动发送告别文案</td></tr>
     <tr><td>告别文案</td><td>停止监听时发送的弹幕内容，如"先下播啦，感谢大家～"</td></tr>
+    <tr><td>下播时自动断开连接</td><td>勾选后，检测到主播下播（非直播中）会自动停止监听，约 40 秒内生效</td></tr>
   </table>
 
   <h3 id="room-cookie">4.2 B站凭证</h3>
@@ -576,7 +577,8 @@
     "enabled": true,
     "minMedalLevel": 0,
     "sendOnDisconnect": true,
-    "disconnectMessage": "先下播啦，感谢大家陪伴～"
+    "disconnectMessage": "先下播啦，感谢大家陪伴～",
+    "autoStopWhenLiveEnds": false
   },
   "credentials": {
     "sessdata": "...",

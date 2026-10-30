@@ -38,6 +38,8 @@ export interface RoomConfig {
   minMedalLevel: number;
   sendOnDisconnect: boolean;
   disconnectMessage: string;
+  /** 下播自动断开：检测到主播下播后自动停止监听 */
+  autoStopWhenLiveEnds: boolean;
 }
 
 export interface ProviderConfig {
@@ -190,6 +192,8 @@ export interface DanmakuAPI {
   onSuperChat: (callback: (data: unknown) => void) => () => void;
   onConnected: (callback: (data: unknown) => void) => () => void;
   onDisconnected: (callback: (data: unknown) => void) => () => void;
+  /** 监听“下播自动断开”完成事件 */
+  onLiveEnded: (callback: (data: { roomId: number; message: string }) => void) => () => void;
   onError: (callback: (data: unknown) => void) => () => void;
   /** 获取当前主题模式设置 */
   getTheme: () => Promise<{ mode: "light" | "dark" | "system"; resolved: "light" | "dark" }>;
@@ -324,6 +328,11 @@ const api: DanmakuAPI = {
     const handler = (_event: unknown, data: unknown) => callback(data);
     ipcRenderer.on("danmaku:disconnected", handler);
     return () => ipcRenderer.removeListener("danmaku:disconnected", handler);
+  },
+  onLiveEnded: (callback) => {
+    const handler = (_event: unknown, data: { roomId: number; message: string }) => callback(data);
+    ipcRenderer.on("danmaku:liveEnded", handler);
+    return () => ipcRenderer.removeListener("danmaku:liveEnded", handler);
   },
   onError: (callback) => {
     const handler = (_event: unknown, data: unknown) => callback(data);

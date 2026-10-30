@@ -25,6 +25,7 @@ const showPreviewBiliJct = ref(false);
 const rawCookie = ref("");
 const sendBeforeDisconnect = ref(true);
 const disconnectMessage = ref("先下播啦，感谢大家陪伴，我们下次见～");
+const autoStopWhenLiveEnds = ref(false);
 let roomPrefsReady = false;
 let disconnectSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let roomIdSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -85,13 +86,14 @@ function autoSave() {
   }, 500);
 }
 
-watch([sendBeforeDisconnect, disconnectMessage], () => {
+watch([sendBeforeDisconnect, disconnectMessage, autoStopWhenLiveEnds], () => {
   if (!roomPrefsReady) return;
   if (disconnectSaveTimer) clearTimeout(disconnectSaveTimer);
   disconnectSaveTimer = setTimeout(async () => {
     try {
       await window.danmakuAPI?.setConfig("room.sendOnDisconnect", sendBeforeDisconnect.value);
       await window.danmakuAPI?.setConfig("room.disconnectMessage", disconnectMessage.value);
+      await window.danmakuAPI?.setConfig("room.autoStopWhenLiveEnds", autoStopWhenLiveEnds.value);
     } catch (e) {
       }
   }, 350);
@@ -139,6 +141,7 @@ const statusMsg = ref("");
 const popupLoginLoading = ref(false);
 const popupLoginStatus = ref("");
 let offLoginStatus: (() => void) | null = null;
+let offLiveEnded: (() => void) | null = null;
 
 // B站连接说明弹窗
 const showBiliHelpModal = ref(false);
@@ -179,6 +182,7 @@ onMounted(async () => {
       }
       sendBeforeDisconnect.value = config.room.sendOnDisconnect ?? true;
       disconnectMessage.value = config.room.disconnectMessage || "先下播啦，感谢大家陪伴，我们下次见～";
+      autoStopWhenLiveEnds.value = config.room.autoStopWhenLiveEnds === true;
       form.minMedalLevel = Number(config.room.minMedalLevel || 0);
     }
     if (config?.credentials) {
@@ -211,9 +215,19 @@ onUnmounted(() => {
     warmupConfirmResolver = null;
   }
   offLoginStatus?.();
+  offLiveEnded?.();
 });
 
 onMounted(() => {
+  if (window.danmakuAPI?.onLiveEnded) {
+    offLiveEnded = window.danmakuAPI.onLiveEnded((payload) => {
+      isConnected.value = false;
+      currentRoomId.value = null;
+      isConnecting.value = false;
+      errorMsg.value = "";
+      statusMsg.value = payload?.message || "主播已下播，已自动断开连接";
+    });
+  }
   if (window.danmakuAPI?.onLoginStatus) {
     offLoginStatus = window.danmakuAPI.onLoginStatus((payload: any) => {
       if (payload?.message) {
@@ -413,6 +427,14 @@ async function openPopupLogin() {
           :disabled="!sendBeforeDisconnect"
           placeholder="例如：先下播啦，感谢大家陪伴，我们下次见～"
         />
+      </div>
+
+      <div class="field">
+        <label class="field-label">下播时自动断开连接</label>
+        <div class="input-with-toggle disconnect-toggle-row">
+          <input v-model="autoStopWhenLiveEnds" type="checkbox" class="disconnect-toggle-input" />
+          <span class="disconnect-toggle-hint">检测到主播下播（非直播中）后自动停止监听，约 40 秒内生效</span>
+        </div>
       </div>
 
       <div v-if="errorMsg" class="msg msg-error">{{ errorMsg }}</div>

@@ -55,6 +55,8 @@ export interface RoomConfig {
   minMedalLevel: number;
   sendOnDisconnect: boolean;
   disconnectMessage: string;
+  /** 下播自动断开：检测到主播下播（非直播中）后自动停止监听 */
+  autoStopWhenLiveEnds: boolean;
 }
 
 /**
@@ -141,6 +143,7 @@ const schema: ConfigSchema = {
     minMedalLevel: 0,
     sendOnDisconnect: true,
     disconnectMessage: "先下播啦，感谢大家陪伴，我们下次见～",
+    autoStopWhenLiveEnds: false,
   },
   credentials: {
     sessdata: "",

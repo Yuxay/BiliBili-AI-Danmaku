@@ -170,6 +170,7 @@ export type PythonRequestMethod =
   | "stop"           // 停止监听
   | "sendDanmaku"    // 发送弹幕
   | "getRoomInfo"    // 获取房间信息
+  | "getLiveStatus"  // 获取直播间开播状态（下播检测）
   | "getStatus";     // 获取状态
 
 // ─── App Configuration (Electron) ──────────────────────────
