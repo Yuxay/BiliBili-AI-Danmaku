@@ -47,6 +47,14 @@ const saveError = ref("");
 const ignoreUsersText = ref("");
 const ignoreSaved = ref(false);
 const ignoreError = ref("");
+const ignoreDanmakuEnabled = ref(false);
+const ignoreDanmakuText = ref("");
+const ignoreDanmakuSaved = ref(false);
+const ignoreDanmakuError = ref("");
+const ignoreTestInput = ref("");
+const ignoreTestResult = ref<{ matched: boolean; pattern: string } | null>(null);
+const ignoreTestErrors = ref<Array<{ pattern: string; message: string }>>([]);
+const ignoreTesting = ref(false);
 const minMedalLevel = ref(0);
 const medalSaved = ref(false);
 const medalError = ref("");
@@ -61,6 +69,13 @@ onMounted(async () => {
     const names = config?.aiModel?.ignoreUsernames;
     if (Array.isArray(names) && names.length > 0) {
       ignoreUsersText.value = names.join("\n");
+    }
+    const ignoreDanmaku = config?.danmakuIgnore;
+    if (ignoreDanmaku) {
+      ignoreDanmakuEnabled.value = ignoreDanmaku.enabled === true;
+      if (Array.isArray(ignoreDanmaku.patterns) && ignoreDanmaku.patterns.length > 0) {
+        ignoreDanmakuText.value = ignoreDanmaku.patterns.join("\n");
+      }
     }
     minMedalLevel.value = Number(config?.room?.minMedalLevel || 0);
     // 读取捕捉开关状态（默认 true）
@@ -119,6 +134,91 @@ async function saveIgnoreUsers() {
     }, 1800);
   } catch (e) {
     ignoreError.value = "保存失败: " + String(e);
+  }
+}
+
+// ─── 忽略弹幕规则 ─────────────────────────────────────────
+
+/** 解析忽略弹幕规则：每行一条（不按逗号拆分，正则/文本里可能包含逗号） */
+function parseIgnoreDanmakuPatterns(): string[] {
+  const tokens = ignoreDanmakuText.value
+    .split(/\r?\n/g)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  return [...new Set(tokens)];
+}
+
+/** 保存忽略弹幕规则（先校验非法正则，再写配置；保存后立即生效） */
+async function saveIgnoreDanmaku() {
+  ignoreDanmakuError.value = "";
+  try {
+    const patterns = parseIgnoreDanmakuPatterns();
+    const check = await window.danmakuAPI?.testIgnoreDanmakuPatterns({ patterns });
+    if (check?.errors && check.errors.length > 0) {
+      ignoreDanmakuError.value =
+        "规则有误：" + check.errors.map((item) => `「${item.pattern}」${item.message}`).join("；");
+      return;
+    }
+    await window.danmakuAPI?.setConfig(
+      "danmakuIgnore",
+      JSON.parse(JSON.stringify({ enabled: ignoreDanmakuEnabled.value === true, patterns })),
+    );
+    ignoreDanmakuSaved.value = true;
+    setTimeout(() => {
+      ignoreDanmakuSaved.value = false;
+    }, 1800);
+  } catch (e) {
+    ignoreDanmakuError.value = "保存失败: " + String(e);
+  }
+}
+
+/** 用一条示例弹幕测试当前输入框里的规则 */
+async function testIgnoreDanmaku() {
+  ignoreDanmakuError.value = "";
+  ignoreTestErrors.value = [];
+  ignoreTestResult.value = null;
+  if (!ignoreTestInput.value.trim()) {
+    ignoreDanmakuError.value = "请先输入一条弹幕内容";
+    return;
+  }
+  ignoreTesting.value = true;
+  try {
+    const result = await window.danmakuAPI?.testIgnoreDanmakuPatterns({
+      patterns: parseIgnoreDanmakuPatterns(),
+      content: ignoreTestInput.value,
+    });
+    if (!result) {
+      ignoreDanmakuError.value = "IPC 桥接不可用";
+      return;
+    }
+    ignoreTestErrors.value = result.errors || [];
+    if (ignoreTestErrors.value.length > 0) {
+      ignoreDanmakuError.value = "规则有误，请先修正";
+      return;
+    }
+    ignoreTestResult.value = { matched: result.matched === true, pattern: result.pattern || "" };
+  } catch (e) {
+    ignoreDanmakuError.value = "测试失败: " + String(e);
+  } finally {
+    ignoreTesting.value = false;
+  }
+}
+
+/** 切换忽略弹幕总开关：独立即时持久化，避免切换页面后回退（规则文本仍由保存按钮提交） */
+async function toggleIgnoreDanmaku(event: Event) {
+  const target = event.target as HTMLInputElement | null;
+  const nextEnabled = target ? target.checked : !ignoreDanmakuEnabled.value;
+  ignoreDanmakuEnabled.value = nextEnabled;
+  ignoreDanmakuError.value = "";
+  try {
+    const result = await window.danmakuAPI?.setConfig("danmakuIgnore.enabled", nextEnabled);
+    if (result && result.status !== "ok") {
+      throw new Error(result.status);
+    }
+  } catch (e) {
+    // 持久化失败时回滚 UI，避免看起来已切换但实际未保存
+    ignoreDanmakuEnabled.value = !nextEnabled;
+    ignoreDanmakuError.value = "开关保存失败: " + String(e);
   }
 }
 
@@ -487,6 +587,74 @@ async function toggleQuickReply(id: string) {
         <button class="btn btn-accent" @click="saveIgnoreUsers">保存忽略列表</button>
         <span v-if="ignoreSaved" class="msg-inline msg-success">已保存</span>
         <span v-if="ignoreError" class="msg-inline msg-error">{{ ignoreError }}</span>
+      </div>
+    </div>
+
+    <div class="card card-mt-12">
+      <div class="btn-row btn-row-space-between btn-row-mb-6">
+        <h3 class="card-title card-title-no-margin">忽略弹幕（命中不回复）</h3>
+        <label class="switch-row">
+          <span class="switch-label">总开关</span>
+          <input :checked="ignoreDanmakuEnabled" type="checkbox" class="switch-input" @change="toggleIgnoreDanmaku" />
+          <span class="switch-track" :class="{ on: ignoreDanmakuEnabled }">
+            <span class="switch-thumb"></span>
+          </span>
+          <span class="switch-state" :class="ignoreDanmakuEnabled ? 'on' : 'off'">
+            {{ ignoreDanmakuEnabled ? "已开启" : "已关闭" }}
+          </span>
+        </label>
+      </div>
+      <p class="card-desc">
+        开关切换后立即保存；规则修改请点下方「保存忽略规则」。命中规则的弹幕仍会正常显示和统计，但不会触发固定回复或 AI 自动回复，保存后立即生效、无需重连。
+      </p>
+      <div class="field">
+        <label class="field-label">规则列表（每行一条）</label>
+        <textarea
+          v-model="ignoreDanmakuText"
+          class="field-input"
+          rows="5"
+          placeholder="例如：\n左+数字\n右+数字\n^数字+连击$"
+        ></textarea>
+        <div class="ignore-help">
+          <div><code>左+数字</code> 匹配「左」紧接数字：左1、走左3、左 12</div>
+          <div><code>^右+数字$</code> 只匹配整条弹幕就是「右+数字」：右12（不匹配「右边12个」）</div>
+          <div>占位符：<code>数字</code> / <code>字母</code> / <code>汉字</code> / <code>任意</code> / <code>空格</code>，用 <code>+</code>（全角 <code>＋</code> 亦可）拼接；匹配加号本身写 <code>\+</code></div>
+          <div>也可用正则：<code>/^6+$/</code>、<code>/^abc$/i</code>（语法与「无需发送标记」一致）</div>
+          <div>默认不区分大小写；不加 <code>^</code> / <code>$</code> 时为「包含」匹配，且会忽略弹幕中的空格差异。</div>
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label">测试一条弹幕</label>
+        <div class="ignore-test-row">
+          <input
+            v-model="ignoreTestInput"
+            class="field-input"
+            placeholder="输入弹幕内容，如：左3"
+            @keyup.enter="testIgnoreDanmaku"
+          />
+          <button class="btn btn-muted" :disabled="ignoreTesting" @click="testIgnoreDanmaku">
+            {{ ignoreTesting ? "测试中..." : "测试" }}
+          </button>
+        </div>
+        <div
+          v-if="ignoreTestResult"
+          class="msg-inline ignore-test-result"
+          :class="ignoreTestResult.matched ? 'msg-warning' : 'msg-success'"
+        >
+          {{ ignoreTestResult.matched
+            ? `命中规则「${ignoreTestResult.pattern}」，这条弹幕不会回复`
+            : "未命中任何规则，这条弹幕会正常进入回复流程" }}
+        </div>
+        <div v-for="err in ignoreTestErrors" :key="err.pattern" class="msg-inline msg-error">
+          规则「{{ err.pattern }}」无效：{{ err.message }}
+        </div>
+      </div>
+      <div class="btn-row btn-row-mt-8">
+        <button class="btn btn-accent" @click="saveIgnoreDanmaku">保存忽略规则</button>
+        <span v-if="ignoreDanmakuSaved" class="msg-inline msg-success">
+          {{ ignoreDanmakuEnabled ? "已保存并立即生效" : "已保存（总开关关闭，暂不生效）" }}
+        </span>
+        <span v-if="ignoreDanmakuError" class="msg-inline msg-error">{{ ignoreDanmakuError }}</span>
       </div>
     </div>
   </div>

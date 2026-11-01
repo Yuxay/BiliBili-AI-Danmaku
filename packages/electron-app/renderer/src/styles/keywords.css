@@ -166,6 +166,44 @@
   gap: 12px;
 }
 
+.ignore-help {
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--bg-primary);
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.8;
+  color: var(--text-muted);
+}
+
+.ignore-help code {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--bg-active);
+  border: 1px solid var(--border);
+  font-family: monospace;
+  color: var(--text-secondary);
+}
+
+.ignore-test-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ignore-test-row .field-input {
+  flex: 1;
+}
+
+.ignore-test-row .btn {
+  flex-shrink: 0;
+}
+
+.ignore-test-result {
+  margin-top: 6px;
+}
+
 .qr-item {
   background: var(--bg-primary);
   border: 1px solid var(--border);

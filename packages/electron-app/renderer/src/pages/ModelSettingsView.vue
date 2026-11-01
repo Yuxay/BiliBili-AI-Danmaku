@@ -1238,6 +1238,9 @@ onUnmounted(() => {
       <div class="msg-inline gate-hint">
         开启后，只有命中唤醒词的弹幕和主播发言才会进入回复流程，适合“叫我才说话”的观众号。
       </div>
+      <div class="msg-inline gate-hint">
+        想按弹幕内容跳过（例如 <code>左+数字</code>、<code>右+数字</code>）？请到「🎯 关键词」页的「忽略弹幕（命中不回复）」中配置。
+      </div>
 
       <div class="field field-inline-2 gate-fields">
         <div>
