@@ -153,6 +153,11 @@ export interface ConfigSchema {
   keywords: KeywordRule[];
   quickRepliesEnabled: boolean;
   quickReplies: QuickReplyRule[];
+  /** 忽略弹幕规则：命中后不进入固定回复 / AI 自动回复 */
+  danmakuIgnore?: {
+    enabled: boolean;
+    patterns: string[];
+  };
   aiModel: AIModelConfig;
   /** 主题模式：light / dark / system */
   theme: "light" | "dark" | "system";
@@ -178,6 +183,14 @@ export interface DanmakuAPI {
   updateQuickReplies: (rules: QuickReplyRule[]) => Promise<{ status: string }>;
   getConfig: () => Promise<ConfigSchema>;
   setConfig: (key: string, value: unknown) => Promise<{ status: string }>;
+  /** 校验 / 测试忽略弹幕规则（不写入配置） */
+  testIgnoreDanmakuPatterns: (payload: { patterns: string[]; content?: string }) => Promise<{
+    status: string;
+    ruleCount?: number;
+    errors?: Array<{ pattern: string; message: string }>;
+    matched?: boolean;
+    pattern?: string;
+  }>;
   exportConfig: (options?: { includeSensitive?: boolean }) => Promise<{ status: string; path?: string; error?: string }>;
   importConfig: (filePath: string) => Promise<{ status: string; error?: string }>;
   importConfigContent: (content: string) => Promise<{ status: string; error?: string }>;
@@ -268,6 +281,7 @@ const api: DanmakuAPI = {
   updateQuickReplies: (rules) => ipcRenderer.invoke("quickReplies:update", rules),
   getConfig: () => ipcRenderer.invoke("config:get"),
   setConfig: (key, value) => ipcRenderer.invoke("config:set", key, value),
+  testIgnoreDanmakuPatterns: (payload) => ipcRenderer.invoke("danmaku:testIgnorePatterns", payload),
   exportConfig: (options) => ipcRenderer.invoke("config:export", options),
   importConfig: (filePath) => ipcRenderer.invoke("config:import", filePath),
   importConfigContent: (content) => ipcRenderer.invoke("config:importContent", content),

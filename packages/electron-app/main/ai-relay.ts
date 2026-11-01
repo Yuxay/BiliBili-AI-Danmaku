@@ -476,6 +476,27 @@ export class AIRelayManager extends EventEmitter {
     void this.processQueue();
   }
 
+  /**
+   * 记录一条被忽略规则拦截的弹幕（不进入 AI 队列）。
+   * 让「AI 返回预览」能说明这条弹幕为什么没有被回复；连续相同原因会合并。
+   */
+  recordIgnoredDanmaku(danmaku: RelayDanmaku, reason: string): void {
+    // 未连接 AI 时没有回复队列，预览里无需记录（避免误以为 AI 在忽略弹幕）
+    if (!this.connected) return;
+    const normalizedReason = String(reason || "").trim();
+    if (!normalizedReason) return;
+    this.skippedCount += 1;
+    this.pushGateDecision({
+      id: `ignore-${danmaku?.id || 0}-${Date.now()}`,
+      timestamp: Date.now(),
+      input: this.formatForModel(danmaku),
+      output: "",
+      action: "skipped",
+      reason: normalizedReason,
+    });
+    this.emitStatus();
+  }
+
   /** 检查弹幕是否应被忽略（echo guard：避免回复自己刚发的消息） */
   shouldIgnoreIncoming(danmaku: RelayDanmaku): boolean {
     const content = this.normalizeText(danmaku.content);

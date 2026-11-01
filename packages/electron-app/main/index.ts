@@ -37,6 +37,11 @@ import {
   type KeywordScope,
 } from "./danmaku-routing";
 import {
+  compileDanmakuIgnorePatterns,
+  DanmakuIgnoreMatcher,
+  matchDanmakuIgnoreRules,
+} from "./danmaku-ignore";
+import {
   resolvePreloadScriptPath,
 } from "./main-paths";
 import { createQuitBarrierController } from "./quit-barrier";
@@ -608,6 +613,32 @@ function registerIpcHandlers(): void {
     return list.some((item) => normalizeUsername(item) === normalized);
   };
 
+  /**
+   * 忽略弹幕规则匹配器缓存。
+   * 规则在配置里是纯字符串数组，按「开关 + 规则内容」指纹重建，
+   * 这样 UI 保存后立即生效（无需重连），又不会每条弹幕都重新编译正则。
+   */
+  let ignoreDanmakuCacheKey = "\u0000";
+  let ignoreDanmakuMatcher = new DanmakuIgnoreMatcher();
+
+  const getIgnoreDanmakuMatcher = (): DanmakuIgnoreMatcher => {
+    const ignoreConfig = getConfig().danmakuIgnore;
+    const patterns =
+      ignoreConfig?.enabled === true && Array.isArray(ignoreConfig.patterns)
+        ? ignoreConfig.patterns
+        : [];
+    const cacheKey = patterns.join("\u0001");
+    if (cacheKey !== ignoreDanmakuCacheKey) {
+      ignoreDanmakuCacheKey = cacheKey;
+      ignoreDanmakuMatcher = new DanmakuIgnoreMatcher(patterns);
+      logger.log("[IgnoreDanmaku] rules reloaded", {
+        enabled: ignoreConfig?.enabled === true,
+        count: ignoreDanmakuMatcher.size,
+      });
+    }
+    return ignoreDanmakuMatcher;
+  };
+
   /** 弹幕连接断开时同步断开 AI 中继 */
   const disconnectAIWhenDanmakuStops = (): void => {
     if (!aiRelay) return;
@@ -814,6 +845,17 @@ function registerIpcHandlers(): void {
           const username = data?.sender?.username || "";
           if (shouldIgnoreByUsername(username)) return;
 
+          const content = data?.content || "";
+
+        // ── 忽略弹幕规则 ──
+        // 命中规则的弹幕仍正常显示与统计，但不进入固定回复 / AI 回复流程。
+        // 规则在每次读取时按配置指纹重建，保存后立即生效。
+          const ignoreRule = getIgnoreDanmakuMatcher().match(content);
+          if (ignoreRule) {
+            aiRelay?.recordIgnoredDanmaku(data, `命中忽略弹幕规则: ${ignoreRule.raw}`);
+            return;
+          }
+
          // ── 捕捉开关 ──
          // 该开关仅控制“关键词匹配/固定回复”链路，不应误伤 AI 自动回复。
          // 关闭时：跳过关键词匹配与固定回复，但 AI 仍可接收弹幕。
@@ -823,7 +865,6 @@ function registerIpcHandlers(): void {
             ? resolveMatchScope(data?.match?.rule?.scope)
             : resolveMatchScope(undefined);
           const hasKeywordMatch = captureEnabled ? Boolean(data?.match) : false;
-          const content = data?.content || "";
           const activeScopes = captureEnabled
             ? (danmakuService?.getKeywordFilterScopes() ?? new Set<KeywordScope>())
             : new Set<KeywordScope>();
@@ -1012,6 +1053,29 @@ function registerIpcHandlers(): void {
     }
     return { status: "ok" };
   });
+
+  /**
+   * 校验 / 测试忽略弹幕规则（不落库）。
+   * 设置页保存前用它检查非法正则，并可用一条示例弹幕实时验证是否命中。
+   */
+  ipcMain.handle(
+    "danmaku:testIgnorePatterns",
+    async (_event, payload?: { patterns?: unknown; content?: unknown }) => {
+      const patternList = Array.isArray(payload?.patterns)
+        ? payload.patterns.map((item) => String(item ?? ""))
+        : [];
+      const content = String(payload?.content ?? "");
+      const compiled = compileDanmakuIgnorePatterns(patternList);
+      const hit = content.trim() ? matchDanmakuIgnoreRules(compiled.rules, content) : null;
+      return {
+        status: "ok",
+        ruleCount: compiled.rules.length,
+        errors: compiled.errors,
+        matched: hit !== null,
+        pattern: hit?.raw ?? "",
+      };
+    },
+  );
 
   registerConfigIpcHandlers(appContext);
   registerAuthIpcHandlers(appContext);
