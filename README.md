@@ -8,7 +8,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.13-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python" />
   <img src="https://img.shields.io/badge/Node.js-24+-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node.js" />
-  <img src="https://img.shields.io/badge/Electron-42-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron" />
+  <img src="https://img.shields.io/badge/Electron-43-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron" />
   <img src="https://img.shields.io/badge/Vue_3-4FC08D?style=flat-square&logo=vue.js&logoColor=white" alt="Vue 3" />
   <img src="https://img.shields.io/badge/License-GPLv3-blue?style=flat-square" alt="License" />
 </p>
@@ -26,7 +26,10 @@
 ### 核心功能
 - 🔴 **实时弹幕监听** — 基于 B站 WebSocket 协议，毫秒级接收弹幕、🎁礼物、💎SC
 - 🎯 **关键词/正则匹配** — 支持纯文本、正则两种匹配模式，可配置大小写敏感和匹配范围（固定回复 / AI / 两者皆可）
-- 🤖 **大模型回复** — 对接 OpenAI 兼容 API + 本地 Ollama，支持自定义 Prompt、发送间隔、队列上限、跳过规则
+- 🤖 **大模型回复** — 对接 OpenAI 兼容 API + 本地 Ollama，支持自定义 Prompt、发送间隔、队列上限、跳过标记与重复回复检测
+- 🎣 **唤醒词识别** — 弹幕出现设定称呼即视为在叫你，模型输入自动带 `[对你]` 标记（主播发言带 `[主播]`），适合「叫我才说话」的观众号
+- 🧠 **滚动上下文** — 最近 N 条弹幕和自己的回复一并发给模型，AI 能接上前文；`0` 关闭，每次只看当前一条
+- 🚪 **回复闸门** — 只回复「叫你」或主播的弹幕，或限制「每窗口最多回复 M 条」；在调用模型前拦截，省 token 又不刷屏
 - ⚡ **固定回复引擎** — 关键词命中后直接发送预设回复，优先级高于 AI，低延迟无等待
 - 🚫 **忽略弹幕规则** — 支持 `左+数字`、`右+数字` 这类动态规则，命中后不触发固定回复 / AI 回复，保存即生效
 - 🔑 **B站一键登录** — 内置 B站扫码登录弹窗，自动提取 Cookie，无需手动复制
@@ -35,13 +38,13 @@
 ### 直播间仪表板
 - 📊 **实时仪表板** — 主播资料卡片、弹幕流、关键词命中统计、AI 队列状态一目了然
 - 📈 **关键词命中排行** — 展示命中次数、匹配模式、优先级排名
-- ⏱️ **AI 回复队列** — 实时显示待发送/已发送/跳过的 AI 回复状态
+- ⏱️ **AI 回复队列** — 实时显示待发送/已发送/跳过的 AI 回复状态，跳过原因（闸门拦截 / 跳过标记 / 重复回复）一并可见
 - 🎯 **捕捉开关** — 全局关键词捕捉开关独立控制，不影响 AI 与固定回复链路
 - 🚫 **连接中断** — 连接过程中可随时点击「取消连接」中断握手
 
 ### 配置与管理
 - 🔒 **配置加密持久化** — 凭证本地 AES-256-GCM 加密存储，支持导出/导入（可选择是否包含敏感信息）
-- 🔄 **热重载** — 连接中修改配置自动生效，无需断开重连
+- 🔄 **热重载** — 关键词、固定回复、忽略弹幕与房间设置修改后即时生效；AI 唤醒词 / 上下文 / 闸门修改后需重新「开始连接」
 - 📋 **模型列表** — OpenCode/Ollama 模型列表自动获取，实时更新
 - 🔧 **per-provider 配置** — 每个模型供应商拥有独立的模型配置，自由切换
 - 🔄 **版本检查** — 启动时自动检测 GitHub 最新 Release，提醒更新
@@ -77,10 +80,12 @@
 
 1. 🐍 Python 核心通过 WebSocket 连接 B站弹幕服务器，实时接收弹幕
 2. 📡 弹幕数据通过 **stdio JSON-RPC** 传递给 Electron 主进程
-3. 🎯 关键词过滤器对每条弹幕做匹配，按 `scope` 路由到固定回复或 AI
-4. ⚡ 固定回复优先级高于 AI，命中后直接发送，阻止 AI 重复回复
-5. 🤖 AI 回复经发送间隔控制后回传 Python，以弹幕形式发回直播间
-6. 🖥️ GUI 提供可视化配置和实时状态监控
+3. 🚫 忽略弹幕规则先做前置过滤：命中规则的弹幕只显示与统计，不进入固定回复和 AI 链路
+4. 🎯 关键词过滤器对剩余弹幕做匹配，按 `scope` 路由到固定回复或 AI
+5. ⚡ 固定回复优先级高于 AI，命中后直接发送，阻止 AI 重复回复
+6. 🚪 AI 中继先过回复闸门（唤醒词 / 主播发言 / 窗口限频），再带滚动上下文调用模型；被拦下的弹幕只进上下文、不回复
+7. 🤖 AI 回复经发送间隔、跳过标记与重复检测后回传 Python，以弹幕形式发回直播间
+8. 🖥️ GUI 提供可视化配置和实时状态监控
 
 **主进程模块架构：**
 
@@ -96,8 +101,10 @@
 | `danmaku-service.ts` | Python 进程管理、JSON-RPC 协议、弹幕收发、连接中断与预热 |
 | `danmaku-routing.ts` | 弹幕路由判定纯函数（scope 解析、固定回复/AI 路由） |
 | `danmaku-ignore.ts` | 忽略弹幕规则编译与匹配（动态规则 / 正则） |
+| `live-status-watcher.ts` | 开播状态轮询，连续确认下播后触发自动断开 |
 | `dashboard-metrics-store.ts` | 直播间仪表板聚合器（关键词命中、AI 队列、主播资料快照） |
-| `ai-relay.ts` | AI 模型对接（OpenAI 兼容 API / Ollama） |
+| `ai-context.ts` | 弹幕格式化（`[主播]` / `[对你]` 标记）、唤醒词、滚动上下文、回复去重与截断 |
+| `ai-relay.ts` | AI 模型对接（OpenAI 兼容 API / Ollama），含回复闸门与上下文拼装 |
 | `ai-ipc.ts` | AI 相关的 IPC 通信桥接 |
 | `quick-reply-engine.ts` | 固定回复引擎，关键词命中后直接发送预设回复 |
 | `runtime-cache.ts` | 运行时临时状态（模型列表缓存等） |
@@ -140,8 +147,10 @@ packages/
     │   ├── danmaku-service.ts          # 🔌 Python 进程管理 + 弹幕收发 + 连接中断
     │   ├── danmaku-routing.ts          # 🎯 弹幕路由判定纯函数
     │   ├── danmaku-ignore.ts           # 🚫 忽略弹幕规则（动态规则 / 正则）
+    │   ├── live-status-watcher.ts      # 🛑 下播检测（轮询开播状态）
     │   ├── dashboard-metrics-store.ts  # 📊 仪表板聚合器
-    │   ├── ai-relay.ts                 # 🤖 AI 模型对接
+    │   ├── ai-context.ts               # 🧠 唤醒词 / 滚动上下文 / 回复格式化
+    │   ├── ai-relay.ts                 # 🤖 AI 模型对接 + 回复闸门
     │   ├── ai-ipc.ts                   # 📡 AI IPC 桥接
     │   ├── quick-reply-engine.ts       # ⚡ 固定回复引擎
     │   ├── runtime-cache.ts            # 💾 运行时缓存
@@ -289,6 +298,11 @@ pnpm package:clean
     "maxPending": 100,
     "ignoreUsernames": [],
     "skipReplies": ["NO_REPLY", "无需回复", "忽略"],
+    "wakeWords": ["比小哩", "比小哩_", "小哩", "哩哩"],
+    "contextSize": 6,
+    "replyOnlyWhenAddressed": false,
+    "replyMaxPerWindow": 3,
+    "replyWindowMs": 60000,
     "providers": {
       "opencode": {
         "modelId": "mimo-v2.5-free",
@@ -356,6 +370,46 @@ pnpm package:clean
 - 默认不区分大小写；原生正则可用 `/pattern/i` 等标志（`g` / `y` 会被自动移除，避免漏匹配）。
 - 匹配时会同时比对原文和去掉空格后的文本，防止用 `左 1` 这类写法绕过。
 
+### 🎣 唤醒词与滚动上下文
+
+在「🤖 大模型」页面的提示词配置区设置。让 AI 知道「谁在叫我」以及「前面聊了什么」。
+
+| 配置项 | 默认值 | 说明 |
+|-----|------|------|
+| `wakeWords` | `比小哩`、`小哩`、`哩哩` | 观众称呼 AI 的名字，每行一个；归一化后长度 ≥ 2 才生效 |
+| `contextSize` | `6` | 滚动上下文条数（`0` = 关闭，每次只看当前一条；上限 20） |
+
+- 唤醒词匹配会忽略 `@`、空格、下划线、标点与大小写，所以 `@比小哩_`、`比 小 哩` 都能命中。
+- 命中唤醒词的弹幕在模型输入里带 `[对你]` 标记；主播本人发言带 `[主播]` 标记（按 uid 判定，不是按昵称）。
+- 系统提示词会自动追加【直播间身份】（观众怎么称呼你）与【本场主播】（主播昵称），无需自己写进 Prompt。
+- 上下文把最近 N 条弹幕和自己的回复拼成 `【最近聊天】…【当前弹幕】` 一并发给模型；被闸门、跳过标记或重复检测拦下的弹幕也会进入上下文，只是不回复。
+- 重新点「开始连接」会重建上下文并清空去重记录；修改唤醒词 / 上下文条数后需重新连接生效。
+
+### 🚪 回复闸门
+
+在「🤖 大模型」页面的「回复闸门」卡片设置，用来控制「什么情况下才值得回」。
+
+| 配置项 | 默认值 | 说明 |
+|-----|------|------|
+| `replyOnlyWhenAddressed` | 关闭 | 只回复「叫了你」或主播的弹幕：弹幕里出现唤醒词（含 `@` 上你的名字）即视为在叫你 |
+| `replyMaxPerWindow` | `3` | 时间窗口内最多回复条数（`0` = 不限制，上限 100） |
+| `replyWindowMs` | `60000` | 频率窗口时长（GUI 以「秒」填写，上限 600 秒） |
+
+- 闸门在**调用模型之前**执行：被拦下的弹幕不消耗 token，只在「AI 返回预览」里记一条跳过原因。
+- 连续相同原因在预览中只保留一条，避免刷满列表；跳过标记、重复回复等拦截同样会出现在预览里。
+- 回复超过 40 字会按标点截断（优先在句末收尾，不会把一句话砍成两半）；与最近 5 条已发送回复重复时同样跳过。
+- 修改闸门参数后需重新点「开始连接」生效；想按弹幕内容直接跳过（例如 `左+数字`），请用上一节的忽略弹幕规则。
+
+### 🛑 下播自动断开
+
+在「📺 直播间配置」页面开启「下播时自动断开连接」（默认关闭，切换后即时保存）。
+
+- 连接期间每 20 秒查询一次直播间开播状态；只有本次连接**先观察到「直播中」**，之后连续 2 次都返回非直播，才判定为主播下播。
+- 查询失败（超时 / 接口异常）视为未知，不累计、不判定，避免网络抖动误断开；从真正下播到断开最慢约 40 秒。
+- 判定下播后停止监听、断开 AI 中继，并在界面提示「主播已下播，已自动断开连接」。
+- 若同时开启「断开前发送告别弹幕」，会尽力发送告别文案（最多等待 5 秒，发送失败不影响断开）。
+- 该开关每次轮询都会重新读取，切换后无需重新连接。
+
 ## 🧰 技术栈
 
 | 层 | 技术 |
@@ -363,7 +417,7 @@ pnpm package:clean
 | 🐍 弹幕核心 | Python 3.13 + [blivedm](https://github.com/xfgryujk/blivedm) + aiohttp |
 | 🔗 进程通信 | JSON-RPC 2.0 over stdio |
 | 🤖 AI 对接 | TypeScript (OpenAI 兼容 API) |
-| ⚡ 桌面客户端 | Electron 42 + Vue 3 + Vite 7 |
+| ⚡ 桌面客户端 | Electron 43 + Vue 3 + Vite 7 |
 | 🔄 状态管理 | Vue 3 Composition API (provide/inject) |
 | 🔒 配置持久化 | electron-store (AES-256-GCM 加密) |
 | 📦 类型共享 | TypeScript project references |
@@ -386,6 +440,7 @@ pnpm package:clean
 
 | 版本 | 日期 | 主要改动                                                                                                                                                                                                   |
 |:------:|:--------:|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **未发布** | 2026-11 | 唤醒词、滚动上下文、回复闸门、忽略弹幕与下播自动断开<br/>• 新增 `ai-context.ts`：唤醒词匹配（忽略 `@`/空格/标点/大小写，≥2 字生效）、弹幕格式化（`[对你]` / `[主播]` 标记）、滚动上下文、回复去重与按标点截断（40 字）<br/>• 系统提示词自动追加【直播间身份】与【本场主播】，无需手写<br/>• 回复闸门：只回复唤醒词 / 主播弹幕 + 时间窗口限频，在调用模型前拦截以省 token，跳过原因显示在「AI 返回预览」<br/>• 新增忽略弹幕规则（动态规则 `左+数字` / 原生正则），命中后不进入固定回复与 AI 流程，保存即生效<br/>• 新增下播自动断开：每 20 秒轮询开播状态，连续 2 次确认非直播才断开，查询失败不判定<br/>• 修复跳过标记误判（改用前缀匹配，`passionate` 不再命中 `pass`）与 `temperature=0` 被默认值覆盖<br/>• 弹幕发送与状态查询补充超时保护，接口卡住时超时返回而不是一直等待 |
 | **v0.5.6** | 2026-08 | 模型列表校对与安全加固<br/>• 免费模型列表按 `/zen/v1/models` 远端实测校准：移除已下线的 `minimax-m2.5-free`、`deepseek-v4-flash-free`、`north-mini-code-free`、`ling-2.6-flash-free`、`trinity-large-preview-free`、`hy3-preview-free`、`nemotron-3-super-free`，以及 `kimi-k2.7`、`claude-opus-4-1`；默认模型改为 `mimo-v2.5-free`<br/>• 失效模型加入弃用黑名单，防远端列表滞后回显<br/>• 安全加固：主窗口阻止意外导航与新窗口（`will-navigate` + `setWindowOpenHandler`）、登录 Cookie 按 `.bilibili.com` 域名过滤、配置导入增加最小形状校验防损坏 JSON 崩溃<br/>• 正确性修复：跳过正则剥除 `g`/`y` 标志（修复"隔一条漏一条"）、正则关键词遵循大小写开关、AI 响应预览截断防 IPC 放大<br/>• 依赖升级：Electron 42→43、Vue 3.5.41、electron-builder 26.15.3、vue-router 5.2.0、vue-tsc 3.3.11 |
 | **v0.5.5** | 2026-06 | 大模型供应商与思考型模型支持增强<br/>• 新增「自定义」供应商：手填 API 端点 / 模型 ID / API Key，可对接任意 OpenAI 或 Anthropic 兼容服务（含 OpenCode 未列出 / 已弃用但仍可用的模型），按 Endpoint URL 自动识别协议<br/>• OpenCode 模型列表全量更新：Free / Go / Zen 三档分组，新增 GPT 5.5、Claude Fable 5、Claude Opus 4.8、Gemini 3.5 Flash、Qwen3.7、Grok Build 0.1 等；移除已弃用模型<br/>• 远端弃用模型黑名单：`claude-sonnet-4`、`glm-5` 等不再经由「远端新增模型」分组回显<br/>• DeepSeek 等思考型模型修复：`max_tokens` 自适应（思考型 ≥ 2048）+ 截断自动重试（2048→4096→8192），解决 token 超长导致的空回复<br/>• 思考标签（`<think>` / `<reasoning>`）清理扩展到所有 provider，防 reasoning 泄漏成弹幕<br/>• Big Pickle（隐身思考模型）握手失败修复：响应式重试 + 运行期发现机制<br/>• 代码模型（north-mini-code 等）代码片段回复过滤，保留 B 站常见弹幕（2333 / 666 / GG）<br/>• 打包脚本修复：`.deploy` 安装加 `--ignore-scripts`，解决 pnpm 在 CI 下因 esbuild 构建脚本被忽略而打包失败<br/>• 构建环境升级至 `pnpm@11.9.0`，`onlyBuiltDependencies` 迁移至 `pnpm-workspace.yaml` |
 | **v0.5.4** | 2026-05 | 打包链路与首次连接体验修复<br/>• 修复 Windows 打包后主程序图标注入链路（`afterPack` + `rcedit`），避免安装后回退 Electron 默认图标<br/>• 首次连接预载提示改为应用内主题化弹窗（暗色/亮色一致）<br/>• 新增“**不再提示**”勾选项，并调整为“**按版本生效**”：同版本可跳过，升级后会重新提示一次<br/>• 修复覆盖安装后提示偏好读取不一致问题（配置读取链路补齐）<br/>• 构建环境升级至 `pnpm@11.0.9` |
