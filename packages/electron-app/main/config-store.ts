@@ -46,6 +46,17 @@ export interface QuickReplyRule {
   cooldownMs: number;
 }
 
+/**
+ * 忽略弹幕规则：命中后该弹幕不进入固定回复 / AI 自动回复流程。
+ * patterns 支持动态写法（左+数字）与 /regex/flags，具体语法见 danmaku-ignore.ts。
+ */
+export interface DanmakuIgnoreConfig {
+  /** 总开关 */
+  enabled: boolean;
+  /** 规则列表，每项一行 */
+  patterns: string[];
+}
+
 /** 直播间基础配置（房间号、最低粉丝牌等级、断开消息等） */
 export interface RoomConfig {
   roomId: number;
@@ -129,6 +140,8 @@ export interface ConfigSchema {
   /** 固定回复全局开关。关闭后规则保留但不会触发发送 */
   quickRepliesEnabled: boolean;
   quickReplies: QuickReplyRule[];
+  /** 忽略弹幕规则（命中不回复） */
+  danmakuIgnore: DanmakuIgnoreConfig;
   aiModel: AIModelConfig;
   /** 主题模式：light / dark / system */
   theme: "light" | "dark" | "system";
@@ -164,6 +177,10 @@ const schema: ConfigSchema = {
   keywords: [],
   quickRepliesEnabled: false,
   quickReplies: [],
+  danmakuIgnore: {
+    enabled: false,
+    patterns: [],
+  },
   aiModel: {
     provider: "opencode",
     prompt: "你现在是一个直播间助理，你会收到粉丝牌+用户名+弹幕内容，请逐条回复，单条回复不超过40字。",
@@ -334,6 +351,7 @@ function hydrateFromSnapshot(target: Store<ConfigSchema>, snapshot: unknown): vo
   target.set("keywords", snap.keywords || schema.keywords);
   target.set("quickRepliesEnabled", snap.quickRepliesEnabled ?? schema.quickRepliesEnabled);
   target.set("quickReplies", snap.quickReplies || schema.quickReplies);
+  target.set("danmakuIgnore", snap.danmakuIgnore || schema.danmakuIgnore);
   target.set("aiModel", snap.aiModel || schema.aiModel);
   target.set("runtimeWarmupCompleted", snap.runtimeWarmupCompleted ?? schema.runtimeWarmupCompleted);
   target.set("runtimeWarmupPromptDisabled", snap.runtimeWarmupPromptDisabled ?? schema.runtimeWarmupPromptDisabled);
@@ -429,6 +447,7 @@ export function getConfig(): ConfigSchema {
     keywords: store.get("keywords", schema.keywords),
     quickRepliesEnabled: store.get("quickRepliesEnabled", schema.quickRepliesEnabled),
     quickReplies: store.get("quickReplies", schema.quickReplies),
+    danmakuIgnore: normalizeDanmakuIgnore(store.get("danmakuIgnore", schema.danmakuIgnore)),
     aiModel: store.get("aiModel", schema.aiModel),
     theme: store.get("theme", schema.theme),
     closeWindowBehavior: store.get("closeWindowBehavior", schema.closeWindowBehavior),
@@ -563,6 +582,25 @@ function normalizeAIModel(ai: AIModelConfig): AIModelConfig {
   };
 }
 
+/**
+ * 补齐/校正忽略弹幕规则。
+ * 老版本配置没有该字段时回退到默认值，避免下游拿到 undefined 后需要处处判空。
+ */
+function normalizeDanmakuIgnore(raw: unknown): DanmakuIgnoreConfig {
+  const src = (raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
+  const patterns = Array.isArray(src.patterns)
+    ? src.patterns
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .slice(0, 100)
+    : [];
+  return {
+    enabled: src.enabled === true,
+    patterns: [...new Set(patterns)],
+  };
+}
+
 /** 设置顶层配置键值（类型安全） */
 export function setConfig<K extends keyof ConfigSchema>(
   key: K,
@@ -676,6 +714,7 @@ export function exportConfigToFile(
       keywords: config.keywords,
       quickRepliesEnabled: config.quickRepliesEnabled ?? schema.quickRepliesEnabled,
       quickReplies: config.quickReplies,
+      danmakuIgnore: config.danmakuIgnore ?? schema.danmakuIgnore,
       aiModel: {
         provider: ai.provider,
         prompt: ai.prompt,
@@ -822,6 +861,9 @@ export function importConfigFromContent(content: string): { status: string; erro
     }
     if (Array.isArray(config.quickReplies)) {
       store.set("quickReplies", config.quickReplies);
+    }
+    if (config.danmakuIgnore && typeof config.danmakuIgnore === "object" && !Array.isArray(config.danmakuIgnore)) {
+      store.set("danmakuIgnore", normalizeDanmakuIgnore(config.danmakuIgnore));
     }
     if (config.aiModel && typeof config.aiModel === "object" && !Array.isArray(config.aiModel)) {
       store.set("aiModel", sanitizeImportedAIModel(config.aiModel));
